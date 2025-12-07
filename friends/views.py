@@ -6,6 +6,7 @@ from rest_framework.generics import ListAPIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from accounts.serializers import UserSerializer
 from .models import Friendship, FriendRequest
 from .serializers import FriendshipSerializer, FriendRequestSerializer
 
@@ -31,6 +32,18 @@ class FriendshipListView(ListAPIView):
     def get_queryset(self):
         user = self.request.user
         return Friendship.objects.filter(models.Q(user1=user) | models.Q(user2=user))
+
+
+class FriendSuggestionsList(ListAPIView):
+    serializer_class = UserSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        excluded_ids = get_excluded_ids(user)
+        suggestions = User.objects.exclude(id__in=excluded_ids).exclude(id=user.id)[:10]
+
+        return Response(UserSerializer(suggestions, many=True).data)
 
 
 class FriendRequestListView(ListAPIView):
@@ -184,3 +197,21 @@ def get_or_create_friendship(user1, user2):
         return Friendship.objects.get_or_create(user1=user1, user2=user2)
     else:
         return Friendship.objects.get_or_create(user1=user2, user2=user1)
+
+
+def get_excluded_ids(user):
+    friend_pairs = Friendship.objects.filter(models.Q(user1=user) | models.Q(user2=user)).values_list("user1_id", "user2_id")
+    friend_ids = set()
+    for user1, user2 in friend_pairs:
+        friend_ids.add(user1)
+        friend_ids.add(user2)
+
+    pending_request_pairs = FriendRequest.objects.filter(models.Q(from_user=user) | models.Q(to_user=user), status="pending").values_list(
+        "from_user_id", "to_user_id"
+    )
+    pending_request_ids = set()
+    for user1, user2 in pending_request_pairs:
+        pending_request_ids.add(user1)
+        pending_request_ids.add(user2)
+
+    return friend_ids.union(pending_request_ids)

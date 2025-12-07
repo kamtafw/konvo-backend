@@ -26,11 +26,16 @@ def user_signup(request):
     serializer = UserSerializer(data=request.data)
     if serializer.is_valid():
         if user := serializer.save():
-            data = serializer.data
+            user_profile = serializer.data
             refresh = RefreshToken.for_user(user)
-            data["refresh"] = str(refresh)
-            data["access"] = str(refresh.access_token)
-            return Response(data, status=status.HTTP_201_CREATED)
+            return Response(
+                {
+                    "profile": user_profile,
+                    "refresh": str(refresh),
+                    "access": str(refresh.access_token),
+                },
+                status=status.HTTP_201_CREATED,
+            )
 
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -66,9 +71,18 @@ def user_login(request):
     if not user.check_password(password):
         return Response({"error": "Invalid login details."}, status=status.HTTP_400_BAD_REQUEST)
 
+    user_profile = UserSerializer(user).data
+
     refresh = RefreshToken.for_user(user)
     data = {
+        "profile": user_profile,
         "refresh": str(refresh),
         "access": str(refresh.access_token),
     }
     return Response(data, status=status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+@permission_classes([permissions.IsAuthenticated])
+def get_user_profile(request):
+    pass

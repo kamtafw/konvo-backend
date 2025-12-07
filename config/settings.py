@@ -34,7 +34,6 @@ AUTH_USER_MODEL = "accounts.User"
 
 INSTALLED_APPS = [
     "daphne",
-    # "channels",
     "django.contrib.admin",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
@@ -42,10 +41,12 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "django.contrib.auth",
     # third-party
+    "channels",
     "rest_framework",
     "rest_framework_simplejwt",
     # local
     "accounts",
+    "chats",
     "friends",
 ]
 
