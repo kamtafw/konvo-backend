@@ -1,38 +1,36 @@
 from urllib.parse import parse_qs
 from channels.db import database_sync_to_async
+from channels.middleware import BaseMiddleware
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.tokens import AccessToken
+from rest_framework_simplejwt.exceptions import TokenError
 
 User = get_user_model()
 
 
-class JWTAuthMiddleware:
-    def __init__(self, inner):
-        self.inner = inner
+@database_sync_to_async
+def get_user_from_token(token):
+    try:
+        access_token = AccessToken(token)
+        user_id = access_token["user_id"]
+        user = User.objects.get(id=user_id)
 
+        return user
+    except (TokenError, User.DoesNotExist, KeyError):
+        return AnonymousUser()
+
+
+class TokenAuthMiddleware(BaseMiddleware):
     async def __call__(self, scope, receive, send):
         query_string = scope.get("query_string", b"").decode()
         query_params = parse_qs(query_string)
         token = query_params.get("token", [None])[0]
 
         if token:
-            user = await self.get_user(token)
-            scope["user"] = user
+            scope["user"] = await get_user_from_token(token)
         else:
             scope["user"] = AnonymousUser()
 
-        return await self.inner(scope, receive, send)
-
-    @database_sync_to_async
-    def get_user(self, token):
-        try:
-            jwt_auth = JWTAuthentication()
-            validated_token = jwt_auth.get_validated_token(token)
-            return jwt_auth.get_user(validated_token)
-        except Exception as e:
-            return AnonymousUser()
-
-
-def JWTAuthMiddlewareStack(inner):
-    return JWTAuthMiddleware(inner)
+        return await super().__call__(scope, receive, send)
