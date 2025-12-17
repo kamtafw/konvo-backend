@@ -7,7 +7,6 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 django_asgi_app = get_asgi_application()
 
 import chats.routing
-import friends.routing
 from accounts.middleware import TokenAuthMiddleware
 
 application = ProtocolTypeRouter(
@@ -16,7 +15,7 @@ application = ProtocolTypeRouter(
         "websocket": AllowedHostsOriginValidator(
             TokenAuthMiddleware(
                 URLRouter(
-                    chats.routing.websocket_urlpatterns + friends.routing.websocket_urlpatterns,
+                    chats.routing.websocket_urlpatterns,
                 )
             )
         ),

@@ -1,3 +1,6 @@
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+
 from django.contrib.auth import get_user_model
 from django.db import models
 from rest_framework import status
@@ -5,6 +8,7 @@ from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.decorators import api_view, permission_classes
 
 from accounts.serializers import UserSerializer
 from .models import Friendship, FriendRequest
@@ -34,16 +38,17 @@ class FriendshipListView(ListAPIView):
         return Friendship.objects.filter(models.Q(user1=user) | models.Q(user2=user))
 
 
-class FriendSuggestionsList(ListAPIView):
-    serializer_class = UserSerializer
-    permission_classes = [IsAuthenticated]
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def friend_suggestions(request):
+    """
+    Get friend suggestions (users who are NOT friends and have NO pending requests)
+    """
+    user = request.user
+    excluded_ids = get_excluded_ids(user)
+    suggestions = User.objects.exclude(id__in=excluded_ids).exclude(id=user.id)[:20]
 
-    def get(self, request):
-        user = request.user
-        excluded_ids = get_excluded_ids(user)
-        suggestions = User.objects.exclude(id__in=excluded_ids).exclude(id=user.id)[:10]
-
-        return Response(UserSerializer(suggestions, many=True).data)
+    return Response(UserSerializer(suggestions, many=True).data)
 
 
 class FriendRequestListView(ListAPIView):
@@ -60,7 +65,9 @@ class FriendRequestListView(ListAPIView):
         return FriendRequest.objects.filter(to_user=user, status="pending")
 
 
-class FriendRequestCreateView(APIView):
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_friend_request(request):
     """
     Create a new friend request from the authenticated user to another user.
     Expects a POST request with JSON body containing:
@@ -81,34 +88,48 @@ class FriendRequestCreateView(APIView):
     - May create a FriendRequest record or update an existing one.
     - Uses request.user as the sender (from_user) of the friend request.
     """
+    to_user_id = request.data.get("to_user_id")
 
-    permission_classes = [IsAuthenticated]
+    if not to_user_id:
+        return Response({"error": "A 'to_user_id' is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-    def post(self, request, *args, **kwargs):
-        to_user_id = request.data.get("to_user_id")
+    if to_user_id == str(request.user.id):
+        return Response({"error": "You cannot send a request to yourself."}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not to_user_id:
-            return Response({"error": "A 'to_user_id' is required."}, status=status.HTTP_400_BAD_REQUEST)
+    to_user = User.objects.filter(id=to_user_id).first()
+    if not to_user:
+        return Response({"error": "User not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        if to_user_id == str(request.user.id):
-            return Response({"error": "You cannot send a request to yourself."}, status=status.HTTP_400_BAD_REQUEST)
+    if user_is_friend(request.user, to_user):
+        return Response({"error": "User is already a friend."}, status=status.HTTP_400_BAD_REQUEST)
 
-        to_user = User.objects.filter(id=to_user_id).first()
-        if not to_user:
-            return Response({"error": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+    friend_request, created = FriendRequest.objects.get_or_create(from_user=request.user, to_user=to_user, defaults={"status": "pending"})
 
-        if user_is_friend(request.user, to_user):
-            return Response({"error": "User is already a friend."}, status=status.HTTP_400_BAD_REQUEST)
+    if not created:
+        friend_request.status = "pending"
+        friend_request.save()
 
-        friend_request, created = FriendRequest.objects.get_or_create(from_user=request.user, to_user=to_user, defaults={"status": "pending"})
+    data = FriendRequestSerializer(friend_request).data
+    print(f"FRIEND REQUEST SENT TO {to_user_id}")
 
-        if not created:
-            friend_request.status = "pending"
-            friend_request.save()
+    # real-time notification to recipient
+    channel_layer = get_channel_layer()
+    async_to_sync(channel_layer.group_send)(
+        f"user_{to_user_id}",
+        {
+            "type": "friend_request_handler",
+            "data": {
+                "type": "friend_request",
+                "from_user": {
+                    "id": request.user.id,
+                    "username": request.user.username,
+                    "profile_picture": request.user.profile_picture,
+                },
+            },
+        },
+    )
 
-        data = FriendRequestSerializer(friend_request).data
-
-        return Response(data, status=status.HTTP_201_CREATED)
+    return Response(data, status=status.HTTP_201_CREATED)
 
 
 class FriendRequestAcceptView(APIView):
@@ -117,25 +138,25 @@ class FriendRequestAcceptView(APIView):
     This view handles POST requests to accept a pending friend request.
     Only authenticated users can access this endpoint.
     Attributes:
-      permission_classes (list): Restricts access to authenticated users only.
+        permission_classes (list): Restricts access to authenticated users only.
     Methods:
-      post(request, pk): Accepts a friend request by ID.
+        post(request, pk): Accepts a friend request by ID.
         Args:
-          request (Request): The HTTP request object containing the authenticated user.
-          pk (int): The primary key (ID) of the friend request to accept.
+            request (Request): The HTTP request object containing the authenticated user.
+            pk (int): The primary key (ID) of the friend request to accept.
         Returns:
-          Response: A success message if the friend request was accepted.
-          Response: A 404 error if the friend request does not exist or is not pending.
+            Response: A success message if the friend request was accepted.
+            Response: A 404 error if the friend request does not exist or is not pending.
         Raises:
-          FriendRequest.DoesNotExist: If the friend request with the given ID,
+            FriendRequest.DoesNotExist: If the friend request with the given ID,
             recipient (to_user), and status "pending" does not exist.
         Process:
-          1. Retrieves the friend request by ID, ensuring it's addressed to the
-              current user and has a "pending" status.
-          2. Updates the friend request status to "accepted".
-          3. Creates or retrieves a friendship relationship between the current
-              user and the friend request sender.
-          4. Returns a success response.
+            1. Retrieves the friend request by ID, ensuring it's addressed to the
+            current user and has a "pending" status.
+            2. Updates the friend request status to "accepted".
+            3. Creates or retrieves a friendship relationship between the current
+            user and the friend request sender.
+            4. Returns a success response.
     """
 
     permission_classes = [IsAuthenticated]
@@ -143,28 +164,46 @@ class FriendRequestAcceptView(APIView):
     def post(self, request, id):
         try:
             friend_request = FriendRequest.objects.get(id=id, to_user=request.user, status="pending")
-            friend_request.status = "accepted"
-            friend_request.save()
-
-            get_or_create_friendship(request.user, friend_request.from_user)
-
-            return Response({"message": "Friend request accepted."})
         except FriendRequest.DoesNotExist:
             return Response({"error": "Friend request does not exist."}, status=status.HTTP_404_NOT_FOUND)
+
+        friend_request.status = "accepted"
+        friend_request.save()
+
+        get_or_create_friendship(request.user, friend_request.from_user)
+
+        # real-time notification to sender (requester)
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f"user_{friend_request.from_user.id}",
+            {
+                "type": "friend_request_accepted_handler",
+                "data": {
+                    "type": "friend_request_accepted",
+                    "accepted_by": {
+                        "id": request.user.id,
+                        "username": request.user.username,
+                        "profile_picture": request.user.profile_picture,
+                    },
+                },
+            },
+        )
+
+        return Response({"message": "Friend request accepted."})
 
 
 class FriendRequestRejectView(APIView):
     """
     FriendRequestReject is a Django REST Framework API view that handles the rejection of friend requests.
     Methods:
-      post(request, pk):
+    post(request, pk):
         Rejects a friend request identified by the primary key (pk) if it exists and is pending.
         Updates the status of the friend request to "rejected" and saves the change to the database.
         Parameters:
-          request (Request): The HTTP request object containing the user making the request.
-          pk (int): The primary key of the friend request to be rejected.
+            request (Request): The HTTP request object containing the user making the request.
+            pk (int): The primary key of the friend request to be rejected.
         Returns:
-          Response: A JSON response indicating the result of the operation.
+            Response: A JSON response indicating the result of the operation.
             - On success: {"message": "Friend request rejected."}
             - On failure: {"error": "Friend request does not exist."} with a 404 status code if the request does not exist.
     """
@@ -174,12 +213,33 @@ class FriendRequestRejectView(APIView):
     def post(self, request, id):
         try:
             friend_request = FriendRequest.objects.get(id=id, to_user=request.user, status="pending")
-            friend_request.status = "rejected"
-            friend_request.save()
-
-            return Response({"message": "Friend request rejected."})
         except FriendRequest.DoesNotExist:
             return Response({"error": "Friend request does not exist."}, status=status.HTTP_404_NOT_FOUND)
+
+        friend_request.status = "rejected"
+        friend_request.save()
+
+        # real-time notification to sender (requester)
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f"user_{friend_request.from_user.id}",
+            {
+                "type": "friend_request_rejected_handler",
+                "data": {
+                    "type": "friend_request_rejected",
+                    "rejected_by": {
+                        "id": request.user.id,
+                        "username": request.user.username,
+                        "profile_picture": request.user.profile_picture,
+                    },
+                },
+            },
+        )
+
+        return Response({"message": "Friend request rejected."})
+
+
+# ==================== DATABASE OPERATIONS ====================
 
 
 def user_is_friend(user1, user2):
